@@ -96,18 +96,64 @@ def plot_posterior(
     fig : plt.Figure
     axes : np.ndarray of plt.Axes
     """
-    ref_vals = true_values if true_values else {}
+    # Map var_names to actual variable names in idata, handling model prefixes
+    actual_var_names = []
+    var_name_mapping = {}  # Map from short name to actual name in idata
+    
+    for var in var_names:
+        # Try to find the variable in posterior
+        if var in idata.posterior:
+            actual_var_names.append(var)
+            var_name_mapping[var] = var
+        else:
+            # Try with common prefixes
+            found = False
+            for prefix in ["bayesian_lr", "hierarchical"]:
+                full_name = f"{prefix}::{var}"
+                if full_name in idata.posterior:
+                    actual_var_names.append(full_name)
+                    var_name_mapping[var] = full_name
+                    found = True
+                    break
+            if not found:
+                # Last resort: find any variable containing the var_name
+                matching = [v for v in idata.posterior.data_vars if var in v and "mu_dim" not in v]
+                if matching:
+                    actual_var_names.append(matching[0])
+                    var_name_mapping[var] = matching[0]
+                else:
+                    # If still not found, just use the original name and let ArviZ handle the error
+                    actual_var_names.append(var)
+                    var_name_mapping[var] = var
+    
     axes = az.plot_posterior(
         idata,
-        var_names=var_names,
-        ref_val=ref_vals if ref_vals else None,
-        figsize=(4 * len(var_names), 4),
+        var_names=actual_var_names,
+        ref_val=None,
+        figsize=(4 * len(actual_var_names), 4),
         textsize=11,
         round_to=3,
         kind="kde",
         color=_STEEL_BLUE,
     )
     fig = plt.gcf()
+    
+    # Overlay ground-truth reference lines if provided
+    if true_values:
+        axes_flat = axes.flatten() if hasattr(axes, 'flatten') else [axes]
+        for i, var_name in enumerate(var_names):
+            if var_name in true_values and i < len(axes_flat):
+                ref_val = true_values[var_name]
+                axes_flat[i].axvline(
+                    ref_val, 
+                    color='red', 
+                    linestyle='--', 
+                    linewidth=2, 
+                    label=f'True value: {ref_val:.3g}',
+                    alpha=0.7
+                )
+                axes_flat[i].legend(loc='upper right')
+    
     fig.suptitle(title, fontsize=14, y=1.02)
     _save(fig, save_path)
     return fig, axes
@@ -232,10 +278,21 @@ def plot_group_comparison(
     fig, ax = plt.subplots(figsize=(9, 5))
 
     # ── Partial-pooling estimates ─────────────────────────────────────────────
-    try:
-        alpha_pp = idata_hierarchical.posterior["hierarchical::alpha"].values
-    except KeyError:
-        alpha_pp = idata_hierarchical.posterior["alpha"].values
+    alpha_pp = None
+    for var_name in ["hierarchical::alpha", "alpha", "bayesian_lr_austenitic::alpha"]:
+        try:
+            alpha_pp = idata_hierarchical.posterior[var_name].values
+            break
+        except KeyError:
+            continue
+    
+    if alpha_pp is None:
+        # Last resort: find any variable ending with 'alpha' that has alloy dimension
+        alpha_vars = [v for v in idata_hierarchical.posterior.data_vars if 'alpha' in v and 'mu' not in v]
+        if alpha_vars:
+            alpha_pp = idata_hierarchical.posterior[alpha_vars[0]].values
+        else:
+            raise KeyError(f"Cannot find 'alpha' variable in posterior. Available: {list(idata_hierarchical.posterior.data_vars)}")
 
     alpha_pp_flat = alpha_pp.reshape(-1, n_groups)
     means_pp = alpha_pp_flat.mean(axis=0)
@@ -252,10 +309,23 @@ def plot_group_comparison(
     # ── No-pooling estimates ─────────────────────────────────────────────────
     if idata_no_pool is not None:
         for i, (idata_np, lbl) in enumerate(zip(idata_no_pool, group_labels)):
-            try:
-                a_np = idata_np.posterior["bayesian_lr::alpha"].values.flatten()
-            except KeyError:
-                a_np = idata_np.posterior["alpha"].values.flatten()
+            # Try multiple possible variable name formats
+            a_np = None
+            for var_name in ["bayesian_lr::alpha", "alpha", "bayesian_lr_austenitic::alpha"]:
+                try:
+                    a_np = idata_np.posterior[var_name].values.flatten()
+                    break
+                except KeyError:
+                    continue
+            
+            if a_np is None:
+                # Last resort: find any variable ending with 'alpha'
+                alpha_vars = [v for v in idata_np.posterior.data_vars if 'alpha' in v]
+                if alpha_vars:
+                    a_np = idata_np.posterior[alpha_vars[0]].values.flatten()
+                else:
+                    continue  # Skip this group if no alpha found
+            
             mean_np = a_np.mean()
             hdi_np = az.hdi(a_np, hdi_prob=0.94)
             ax.errorbar(

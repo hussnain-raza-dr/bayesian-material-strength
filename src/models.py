@@ -115,21 +115,21 @@ class BayesianStrengthModel:
         """
         with pm.Model(name=self.name) as model:
             # ── Priors ───────────────────────────────────────────────────────
+            # Intercept: tensile strength at T=0 °C, C=0 wt% (MPa)
             alpha = pm.Normal(
-                "alpha", mu=500.0, sigma=100.0,
-                doc="Intercept: tensile strength at T=0 °C, C=0 wt% (MPa)"
+                "alpha", mu=500.0, sigma=100.0
             )
+            # Temperature coefficient (MPa / °C)
             beta_T = pm.Normal(
-                "beta_T", mu=-0.5, sigma=0.3,
-                doc="Temperature coefficient (MPa / °C)"
+                "beta_T", mu=-0.5, sigma=0.3
             )
+            # Carbon content coefficient (MPa / wt%C)
             beta_C = pm.Normal(
-                "beta_C", mu=250.0, sigma=100.0,
-                doc="Carbon content coefficient (MPa / wt%C)"
+                "beta_C", mu=250.0, sigma=100.0
             )
+            # Measurement noise SD (MPa); consistent with ISO 6892-1
             sigma = pm.HalfNormal(
-                "sigma", sigma=50.0,
-                doc="Measurement noise SD (MPa); consistent with ISO 6892-1"
+                "sigma", sigma=50.0
             )
 
             # ── Deterministic mean ───────────────────────────────────────────
@@ -237,12 +237,40 @@ class BayesianStrengthModel:
         if self.model is None:
             raise RuntimeError("Call build() before sample_advi().")
 
-        with self.model:
+        # Rebuild model for ADVI (PyMC model state is affected after NUTS sampling)
+        with pm.Model(name=self.name) as model_advi:
+            # ── Priors ───────────────────────────────────────────────────────
+            # Intercept: tensile strength at T=0 °C, C=0 wt% (MPa)
+            alpha = pm.Normal(
+                "alpha", mu=500.0, sigma=100.0
+            )
+            # Temperature coefficient (MPa / °C)
+            beta_T = pm.Normal(
+                "beta_T", mu=-0.5, sigma=0.3
+            )
+            # Carbon content coefficient (MPa / wt%C)
+            beta_C = pm.Normal(
+                "beta_C", mu=250.0, sigma=100.0
+            )
+            # Measurement noise SD (MPa); consistent with ISO 6892-1
+            sigma = pm.HalfNormal(
+                "sigma", sigma=50.0
+            )
+
+            # ── Deterministic mean ───────────────────────────────────────────
+            mu = pm.Deterministic(
+                "mu", alpha + beta_T * self._T + beta_C * self._C
+            )
+
+            # ── Likelihood ───────────────────────────────────────────────────
+            y_obs = pm.Normal(  # noqa: F841
+                "y_obs", mu=mu, sigma=sigma, observed=self._y
+            )
+
             approx = pm.fit(
                 n=n_iterations,
                 method="advi",
                 random_seed=random_seed,
-                progressbar=True,
             )
             idata_advi = approx.sample(10_000)
 
@@ -280,10 +308,11 @@ class BayesianStrengthModel:
 
         posterior = self.idata.posterior
         # Flatten chains × draws
-        alpha_samples = posterior["alpha"].values.reshape(-1)[:n_samples]
-        beta_T_samples = posterior["beta_T"].values.reshape(-1)[:n_samples]
-        beta_C_samples = posterior["beta_C"].values.reshape(-1)[:n_samples]
-        sigma_samples = posterior["sigma"].values.reshape(-1)[:n_samples]
+        # Note: variables are namespaced with model name (e.g., "bayesian_lr::alpha")
+        alpha_samples = posterior[f"{self.name}::alpha"].values.reshape(-1)[:n_samples]
+        beta_T_samples = posterior[f"{self.name}::beta_T"].values.reshape(-1)[:n_samples]
+        beta_C_samples = posterior[f"{self.name}::beta_C"].values.reshape(-1)[:n_samples]
+        sigma_samples = posterior[f"{self.name}::sigma"].values.reshape(-1)[:n_samples]
 
         rng = np.random.default_rng(0)
         mu_pred = (
@@ -429,38 +458,38 @@ class HierarchicalStrengthModel:
             group_idx = pm.Data("group_idx", self._g, dims="obs_id")
 
             # ── Hyperpriors (population level) ───────────────────────────────
+            # Global mean intercept across alloy families (MPa)
             mu_alpha = pm.Normal(
-                "mu_alpha", mu=500.0, sigma=100.0,
-                doc="Global mean intercept across alloy families (MPa)"
+                "mu_alpha", mu=500.0, sigma=100.0
             )
+            # Between-group SD of intercepts (MPa)
             sigma_alpha = pm.HalfNormal(
-                "sigma_alpha", sigma=100.0,
-                doc="Between-group SD of intercepts (MPa)"
+                "sigma_alpha", sigma=100.0
             )
 
             # ── Group-level intercepts (partial pooling) ─────────────────────
             alpha_offset = pm.Normal(
                 "alpha_offset", mu=0.0, sigma=1.0, dims="alloy"
             )
+            # Group-specific intercepts (non-centred parametrisation)
             alpha = pm.Deterministic(
                 "alpha",
                 mu_alpha + sigma_alpha * alpha_offset,
-                dims="alloy",
-                doc="Group-specific intercepts (non-centred parametrisation)"
+                dims="alloy"
             )
 
             # ── Shared (common) slope priors ─────────────────────────────────
+            # Temperature coefficient, shared across phases (MPa/°C)
             beta_T = pm.Normal(
-                "beta_T", mu=-0.5, sigma=0.3,
-                doc="Temperature coefficient, shared across phases (MPa/°C)"
+                "beta_T", mu=-0.5, sigma=0.3
             )
+            # Carbon content coefficient, shared (MPa/wt%C)
             beta_C = pm.Normal(
-                "beta_C", mu=250.0, sigma=100.0,
-                doc="Carbon content coefficient, shared (MPa/wt%C)"
+                "beta_C", mu=250.0, sigma=100.0
             )
+            # Within-group residual noise (MPa)
             sigma = pm.HalfNormal(
-                "sigma", sigma=50.0,
-                doc="Within-group residual noise (MPa)"
+                "sigma", sigma=50.0
             )
 
             # ── Deterministic mean ───────────────────────────────────────────
@@ -569,10 +598,11 @@ class HierarchicalStrengthModel:
             raise RuntimeError("Call sample() before predict().")
 
         posterior = self.idata.posterior
-        alpha_s = posterior["alpha"].values.reshape(-1, self.n_groups)[:n_samples, group_idx]
-        beta_T_s = posterior["beta_T"].values.reshape(-1)[:n_samples]
-        beta_C_s = posterior["beta_C"].values.reshape(-1)[:n_samples]
-        sigma_s = posterior["sigma"].values.reshape(-1)[:n_samples]
+        # Note: variables are namespaced with model name (e.g., "hierarchical::alpha")
+        alpha_s = posterior[f"{self.name}::alpha"].values.reshape(-1, self.n_groups)[:n_samples, group_idx]
+        beta_T_s = posterior[f"{self.name}::beta_T"].values.reshape(-1)[:n_samples]
+        beta_C_s = posterior[f"{self.name}::beta_C"].values.reshape(-1)[:n_samples]
+        sigma_s = posterior[f"{self.name}::sigma"].values.reshape(-1)[:n_samples]
 
         rng = np.random.default_rng(0)
         mu_pred = (

@@ -1,0 +1,13 @@
+pymc==5.10.0
+arviz==0.18.0
+numpy==1.24.3
+scipy==1.11.1
+pandas==2.0.3
+matplotlib==3.7.2
+seaborn==0.12.2
+pytensor==2.23.1
+jax==0.4.13
+jaxlib==0.4.13
+jupyter==1.0.0
+jupyterlab==4.0.4
+ipython==8.15.0
